@@ -13,6 +13,7 @@ namespace YesChef.Scoring
 
         public static event Action<int> ScoreChanged;
         public static event Action<int> HighScoreChanged;
+        public static event Action<int> NewHighScoreAchieved;
 
         public static int CurrentScore { get; private set; }
         public static int HighScore { get; private set; } = PlayerPrefs.GetInt(HighScorePlayerPrefsKey, 0);
@@ -30,7 +31,7 @@ namespace YesChef.Scoring
             HighScore = CurrentScore;
             PlayerPrefs.SetInt(HighScorePlayerPrefsKey, HighScore);
             PlayerPrefs.Save();
-            HighScoreChanged?.Invoke(HighScore);
+            NewHighScoreAchieved?.Invoke(HighScore);
         }
 
         public static void ResetRun()

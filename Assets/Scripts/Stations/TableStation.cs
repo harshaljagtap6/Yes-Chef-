@@ -5,6 +5,7 @@ using YesChef.Data;
 using YesChef.Interaction;
 using YesChef.Items;
 using YesChef.Player;
+using YesChef.Core;
 
 namespace YesChef.Stations
 {
@@ -31,12 +32,12 @@ namespace YesChef.Stations
         /// Raised with a 0–1 value whenever chopping progress changes. UI should subscribe
         /// instead of polling station state.
         /// </summary>
-        public event Action<float> ProgressChanged;
+        public static event Action<float> ProgressChanged;
 
         /// <summary>
         /// Raised once when the placed vegetable finishes chopping.
         /// </summary>
-        public event Action ChoppingCompleted;
+        public static event Action ChoppingCompleted;
 
         public KitchenItem PlacedItem => _placedItem;
         public float Progress => _chopProgress;
@@ -68,6 +69,16 @@ namespace YesChef.Stations
             }
 
             CompleteChopping();
+        }
+
+        private void OnEnable()
+        {
+            GameManager.OnRoundEnded += ResetStation;
+        }
+
+        private void OnDisable()
+        {
+            GameManager.OnRoundEnded -= ResetStation;
         }
 
         public bool TryInteract(PlayerController player)
@@ -169,6 +180,22 @@ namespace YesChef.Stations
             Log($"Finished chopping {_placedItem.Ingredient.DisplayName}.");
         }
 
+        private void ResetStation()
+        {
+            if (_placedItem != null)
+            {
+                Destroy(_placedItem.gameObject);
+            }
+
+            _placedItem = null;
+            _choppingPlayer = null;
+            _chopProgress = 0f;
+            _isChopping = false;
+            SetProgressVisual(0f);
+            ProgressChanged?.Invoke(0f);
+            Log("Cleared the table for the next round.");
+        }
+
         private bool IsChoppingPlayerNearby()
         {
             if (_choppingPlayer == null)
@@ -197,10 +224,10 @@ namespace YesChef.Stations
 
         private void SetProgressVisual(float progress)
         {
-            if (_progressImage != null)
-            {
-                _progressImage.fillAmount = progress;
-            }
+            // if (_progressImage != null)
+            // {
+            //     _progressImage.fillAmount = progress;
+            // }
         }
 
         private void OnDrawGizmos()

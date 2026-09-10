@@ -12,15 +12,13 @@ namespace YesChef.Customers
         private readonly IngredientSO[] _requestedItems;
         private readonly bool[] _fulfilled;
         private int _remainingCount;
-        private readonly float _startedAtRealtime;
+        private float _startedAtRealtime = -1f;
 
         public CustomerOrder(IngredientSO[] requestedItems)
         {
             _requestedItems = requestedItems ?? System.Array.Empty<IngredientSO>();
             _fulfilled = new bool[_requestedItems.Length];
             _remainingCount = 0;
-            _startedAtRealtime = Time.time;
-
             for (int index = 0; index < _requestedItems.Length; index++)
             {
                 if (_requestedItems[index] != null)
@@ -37,8 +35,16 @@ namespace YesChef.Customers
         public int ItemCount => _requestedItems.Length;
         public int RemainingCount => _remainingCount;
         public bool IsComplete => _remainingCount <= 0;
-        public float ElapsedSeconds => Time.time - _startedAtRealtime;
+        public float ElapsedSeconds => _startedAtRealtime < 0f ? 0f : Time.time - _startedAtRealtime;
         public IngredientSO[] RequestedItems => _requestedItems;
+
+        /// <summary>
+        /// Starts or resets the order timer when its customer begins waiting at a window.
+        /// </summary>
+        public void StartTimer()
+        {
+            _startedAtRealtime = Time.time;
+        }
 
         public bool CanAccept(KitchenItem kitchenItem)
         {

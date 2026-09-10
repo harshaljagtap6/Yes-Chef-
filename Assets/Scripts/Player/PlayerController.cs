@@ -2,7 +2,9 @@ using System;
 using UnityEngine;
 using UnityEngine.AI;
 using UnityEngine.InputSystem;
+using YesChef.Core;
 using YesChef.Interaction;
+using YesChef.Stations;
 
 namespace YesChef.Player
 {
@@ -94,7 +96,9 @@ namespace YesChef.Player
                 _pointerPressInputAction.performed += OnPointerPressed;
                 _pointerPressInputAction.Enable();
             }
+            GameManager.OnRoundEnded += CallReleaseHeldItem;
         }
+
 
         private void OnDisable()
         {
@@ -108,6 +112,8 @@ namespace YesChef.Player
                 _pointerPressInputAction.performed -= OnPointerPressed;
                 _pointerPressInputAction.Disable();
             }
+
+            GameManager.OnRoundEnded -= CallReleaseHeldItem;
 
             ClearSelectedStation();
         }
@@ -133,6 +139,10 @@ namespace YesChef.Player
                 ClearSelectedStation();
             }
         }
+        private void CallReleaseHeldItem()
+        {
+            ReleaseHeldItem();
+        }
 
         public void SetInteractionEnabled(bool isEnabled)
         {
@@ -155,7 +165,6 @@ namespace YesChef.Player
             _heldItem = kitchenItem;
             HeldItemChanged?.Invoke(_heldItem);
             Log($"Picked up '{kitchenItem.name}' and attached it to the hold point.");
-            transform.rotation = Quaternion.Euler(0f, 180f, 0f);
             return true;
         }
 
@@ -177,6 +186,11 @@ namespace YesChef.Player
 
         private void OnPointerPressed(InputAction.CallbackContext context)
         {
+            if (GameManager.CurrentGameState != GameManager.GameState.Playing)
+            {
+                Log("Ignored station selection because the game is not in the Playing state.");
+                return;
+            }
             if (!_movementEnabled || !_interactionEnabled || _stationaryCamera == null || _pointerPositionInputAction == null)
             {
                 Log("Ignored station selection because movement, interaction, camera, or pointer input is unavailable.");
@@ -293,9 +307,12 @@ namespace YesChef.Player
 
         private void AttemptSelectedInteraction()
         {
+            bool shouldTurnAround = false;
+
             if (_selectedStation is IInteractable interactable)
             {
                 bool interactionSucceeded = interactable.TryInteract(this);
+                shouldTurnAround = interactionSucceeded && ShouldTurnAroundAfterInteraction(interactable);
                 Log($"Station '{_selectedStation.name}' interaction {(interactionSucceeded ? "succeeded" : "was rejected")}.");
             }
             else
@@ -304,6 +321,19 @@ namespace YesChef.Player
             }
 
             ClearSelectedStation();
+
+            if (shouldTurnAround)
+            {
+                transform.Rotate(0f, 180f, 0f, Space.World);
+            }
+        }
+
+        private static bool ShouldTurnAroundAfterInteraction(IInteractable interactable)
+        {
+            return interactable is FridgeStation
+                   or StoveStation
+                   or TrashStation
+                   or TableStation;
         }
 
         private void ClearSelectedStation()

@@ -5,6 +5,7 @@ using YesChef.Data;
 using YesChef.Interaction;
 using YesChef.Items;
 using YesChef.Player;
+using YesChef.Core;
 
 namespace YesChef.Stations
 {
@@ -27,12 +28,12 @@ namespace YesChef.Stations
         /// <summary>
         /// Raised with slot index and 0–1 progress whenever a slot's cook timer changes.
         /// </summary>
-        public event Action<int, float> SlotProgressChanged;
+        public static event Action<int, float> SlotProgressChanged;
 
         /// <summary>
         /// Raised when a slot finishes cooking its meat.
         /// </summary>
-        public event Action<int> SlotCookingCompleted;
+        public static event Action<int> SlotCookingCompleted;
 
         public float InteractionRadius => _interactionRadius;
         public Vector3 InteractionCenter => _interactionCenter != null ? _interactionCenter.position : transform.position;
@@ -56,6 +57,16 @@ namespace YesChef.Stations
             {
                 TickSlot(index, deltaTime);
             }
+        }
+
+        void OnEnable()
+        {
+            GameManager.OnRoundEnded += ResetSlots;
+        }
+
+        void OnDisable()
+        {
+            GameManager.OnRoundEnded -= ResetSlots;
         }
 
         public bool TryInteract(PlayerController player)
@@ -218,16 +229,16 @@ namespace YesChef.Stations
 
         private void SetSlotProgressVisual(int slotIndex, float progress)
         {
-            if (_slots == null || slotIndex >= _slots.Length || _slots[slotIndex] == null)
-            {
-                return;
-            }
+            // if (_slots == null || slotIndex >= _slots.Length || _slots[slotIndex] == null)
+            // {
+            //     return;
+            // }
 
-            Image progressImage = _slots[slotIndex].ProgressImage;
-            if (progressImage != null)
-            {
-                progressImage.fillAmount = progress;
-            }
+            // Image progressImage = _slots[slotIndex].ProgressImage;
+            // if (progressImage != null)
+            // {
+            //     progressImage.fillAmount = progress;
+            // }
         }
 
         private void EnsureSlotArray()
@@ -248,6 +259,26 @@ namespace YesChef.Stations
             }
 
             _slots = resized;
+        }
+
+        private void ResetSlots()
+        {
+            for (int index = 0; index < SlotCount; index++)
+            {
+                SlotRuntime runtime = _slotRuntimes[index];
+                if (runtime.Item != null)
+                {
+                    Destroy(runtime.Item.gameObject);
+                }
+
+                runtime.Item = null;
+                runtime.Progress = 0f;
+                runtime.IsCooking = false;
+                SetSlotProgressVisual(index, 0f);
+                SlotProgressChanged?.Invoke(index, 0f);
+            }
+
+            Log("Cleared both stove slots for the next round.");
         }
 
         private static bool IsValidRawMeat(KitchenItem kitchenItem)

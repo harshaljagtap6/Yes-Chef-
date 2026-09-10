@@ -7,6 +7,7 @@ using YesChef.Interaction;
 using YesChef.Items;
 using YesChef.Player;
 using YesChef.Scoring;
+using YesChef.Core;
 
 namespace YesChef.Stations
 {
@@ -20,18 +21,19 @@ namespace YesChef.Stations
     {
         [SerializeField] private Customer _customerPrefab;
         [SerializeField] private Transform _customerWaitPoint;
+        [SerializeField] private Transform _scorePopupWorldPosition;
         [SerializeField] private IngredientSO[] _menuIngredients;
-        [SerializeField, Min(1)] private int _minItemsPerOrder = 1;
-        [SerializeField, Min(1)] private int _maxItemsPerOrder = 3;
         [SerializeField, Min(0f)] private float _respawnCooldown = 5f;
         [SerializeField] private Transform _interactionCenter;
         [SerializeField, Min(0.01f)] private float _interactionRadius = 1.25f;
         [SerializeField] private TMP_Text _orderText;
+        [SerializeField] private TMP_Text _timerText;
         [SerializeField] private bool _enableDebugLogs = true;
 
         private Customer _currentCustomer;
         private float _cooldownRemaining;
         private bool _isOnCooldown;
+        private int _lastPublishedElapsedSeconds = int.MinValue;
 
         /// <summary>
         /// Raised when a new customer arrives with an order.
@@ -53,11 +55,24 @@ namespace YesChef.Stations
         /// </summary>
         public event Action<CustomerOrder, int> OrderCompleted;
 
+        /// <summary>
+        /// Raised when the waiting customer's elapsed whole seconds change. A value of -1 means no customer is waiting.
+        /// </summary>
+        public event Action<int> OrderElapsedSecondsChanged;
+
+        /// <summary>
+        /// Raised after an order score is added, including the world position where its UI feedback should appear.
+        /// </summary>
+        public static event Action<Vector3, int> OrderScoreAdded;
+
         public Customer CurrentCustomer => _currentCustomer;
         public CustomerOrder CurrentOrder => _currentCustomer != null ? _currentCustomer.Order : null;
         public bool IsOnCooldown => _isOnCooldown;
         public float InteractionRadius => _interactionRadius;
         public Vector3 InteractionCenter => _interactionCenter != null ? _interactionCenter.position : transform.position;
+        public Vector3 ScorePopupWorldPosition => _scorePopupWorldPosition != null
+            ? _scorePopupWorldPosition.position
+            : _customerWaitPoint != null ? _customerWaitPoint.position : transform.position;
 
         private void Awake()
         {
@@ -66,16 +81,30 @@ namespace YesChef.Stations
                 _orderText = GetComponentInChildren<TMP_Text>(true);
             }
 
+            if (_timerText != null)
+            {
+                OrderElapsedSecondsChanged += UpdateTimerText;
+            }
+
+            GameManager.OnRoundStarted += SpawnCustomer;
+
             RefreshOrderText();
+            PublishElapsedSeconds(-1);
         }
 
         private void Start()
         {
-            SpawnCustomer();
         }
 
         private void Update()
         {
+            if (GameManager.CurrentGameState != GameManager.GameState.Playing)
+            {
+                return;
+            }
+
+            UpdateElapsedTimer();
+
             if (!_isOnCooldown)
             {
                 return;
@@ -94,6 +123,8 @@ namespace YesChef.Stations
 
         private void OnDestroy()
         {
+            GameManager.OnRoundStarted -= SpawnCustomer;
+            OrderElapsedSecondsChanged -= UpdateTimerText;
             DespawnCustomer();
         }
 
@@ -162,6 +193,7 @@ namespace YesChef.Stations
             CustomerOrder completedOrder = _currentCustomer.Order;
             int orderScore = completedOrder.CalculateScore();
             ScoreTracker.AddOrderScore(orderScore);
+            OrderScoreAdded?.Invoke(ScorePopupWorldPosition, orderScore);
             OrderCompleted?.Invoke(completedOrder, orderScore);
             Log($"Order complete. Score awarded: {orderScore}. Total: {ScoreTracker.CurrentScore}.");
 
@@ -187,9 +219,11 @@ namespace YesChef.Stations
             Vector3 spawnPosition = _customerWaitPoint != null ? _customerWaitPoint.position : transform.position;
             Quaternion spawnRotation = _customerWaitPoint != null ? _customerWaitPoint.rotation : transform.rotation;
             _currentCustomer = Instantiate(_customerPrefab, spawnPosition, spawnRotation);
+            order.StartTimer();
             _currentCustomer.Initialize(this, order);
             CustomerArrived?.Invoke(_currentCustomer, order);
             RefreshOrderText();
+            PublishElapsedSeconds(0);
             Log("Spawned a waiting customer.");
         }
 
@@ -202,6 +236,7 @@ namespace YesChef.Stations
 
             Destroy(_currentCustomer.gameObject);
             _currentCustomer = null;
+            PublishElapsedSeconds(-1);
         }
 
         private void BeginCooldown()
@@ -220,37 +255,38 @@ namespace YesChef.Stations
                 return null;
             }
 
-            int maxItems = Mathf.Clamp(_maxItemsPerOrder, 1, availableCount);
-            int minItems = Mathf.Clamp(_minItemsPerOrder, 1, maxItems);
-            int itemCount = UnityEngine.Random.Range(minItems, maxItems + 1);
+            int itemCount = UnityEngine.Random.value < 0.5f ? 2 : 3;
             IngredientSO[] requestedItems = new IngredientSO[itemCount];
-            int filledCount = 0;
-            int safetyLimit = availableCount * 4;
 
-            for (int attempt = 0; attempt < safetyLimit && filledCount < itemCount; attempt++)
+            for (int index = 0; index < requestedItems.Length; index++)
             {
-                IngredientSO candidate = _menuIngredients[UnityEngine.Random.Range(0, _menuIngredients.Length)];
-                if (candidate == null || ContainsIngredient(requestedItems, filledCount, candidate))
+                requestedItems[index] = GetRandomMenuIngredient(availableCount);
+            }
+
+            return new CustomerOrder(requestedItems);
+        }
+
+        private IngredientSO GetRandomMenuIngredient(int availableCount)
+        {
+            int selectedIndex = UnityEngine.Random.Range(0, availableCount);
+
+            for (int index = 0; index < _menuIngredients.Length; index++)
+            {
+                IngredientSO ingredient = _menuIngredients[index];
+                if (ingredient == null)
                 {
                     continue;
                 }
 
-                requestedItems[filledCount] = candidate;
-                filledCount++;
-            }
-
-            if (filledCount < itemCount)
-            {
-                IngredientSO[] packed = new IngredientSO[filledCount];
-                for (int index = 0; index < filledCount; index++)
+                if (selectedIndex == 0)
                 {
-                    packed[index] = requestedItems[index];
+                    return ingredient;
                 }
 
-                requestedItems = packed;
+                selectedIndex--;
             }
 
-            return new CustomerOrder(requestedItems);
+            return null;
         }
 
         private int CountAvailableIngredients()
@@ -272,17 +308,41 @@ namespace YesChef.Stations
             return count;
         }
 
-        private static bool ContainsIngredient(IngredientSO[] items, int filledCount, IngredientSO candidate)
+        private void UpdateElapsedTimer()
         {
-            for (int index = 0; index < filledCount; index++)
+            CustomerOrder order = CurrentOrder;
+            int elapsedSeconds = order != null && !order.IsComplete
+                ? Mathf.FloorToInt(order.ElapsedSeconds)
+                : -1;
+            PublishElapsedSeconds(elapsedSeconds);
+        }
+
+        private void PublishElapsedSeconds(int elapsedSeconds)
+        {
+            if (_lastPublishedElapsedSeconds == elapsedSeconds)
             {
-                if (items[index] == candidate)
-                {
-                    return true;
-                }
+                return;
             }
 
-            return false;
+            _lastPublishedElapsedSeconds = elapsedSeconds;
+            _timerText.text = _lastPublishedElapsedSeconds.ToString();
+            OrderElapsedSecondsChanged?.Invoke(elapsedSeconds);
+        }
+
+        private void UpdateTimerText(int elapsedSeconds)
+        {
+            if (_timerText == null)
+            {
+                return;
+            }
+
+            if (elapsedSeconds < 0)
+            {
+                _timerText.text = string.Empty;
+                return;
+            }
+
+            _timerText.SetText("Time: {0:0}s", elapsedSeconds);
         }
 
         private void RefreshOrderText()
