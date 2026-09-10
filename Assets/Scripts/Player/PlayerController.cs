@@ -1,21 +1,22 @@
 using System;
 using UnityEngine;
+using UnityEngine.AI;
 using UnityEngine.InputSystem;
 using YesChef.Interaction;
 
 namespace YesChef.Player
 {
     /// <summary>
-    /// Moves the player to clicked kitchen stations, interacts on arrival, and owns the
-    /// player's single item carry slot.
+    /// Moves the player to clicked kitchen stations using NavMesh pathfinding, 
+    /// interacts on arrival, and owns the player's single item carry slot.
     /// </summary>
     [DisallowMultipleComponent]
-    [RequireComponent(typeof(CharacterController))]
+    [RequireComponent(typeof(NavMeshAgent))]
     public sealed class PlayerController : MonoBehaviour
     {
-        private const float GroundedVerticalVelocity = -2f;
         private const float MovementInputThreshold = 0.0001f;
         private const float InsideColliderSqrThreshold = 0.0001f;
+
         [Header("Station Selection Input")]
         [Tooltip("Assign the UI/Point action from InputSystem_Actions.")]
         [SerializeField] private InputActionReference _pointerPositionAction;
@@ -25,7 +26,6 @@ namespace YesChef.Player
         [Header("Movement")]
         [SerializeField, Min(0f)] private float _movementSpeed = 5f;
         [SerializeField, Min(0f)] private float _rotationSpeed = 720f;
-        [SerializeField] private float _gravity = -20f;
         [Tooltip("The fixed top-down camera used to raycast clicked stations.")]
         [SerializeField] private Camera _stationaryCamera;
 
@@ -42,10 +42,9 @@ namespace YesChef.Player
         [Header("Debug")]
         [SerializeField] private bool _enableDebugLogs = true;
 
-        private CharacterController _characterController;
+        private NavMeshAgent _navMeshAgent;
         private InputAction _pointerPositionInputAction;
         private InputAction _pointerPressInputAction;
-        private float _verticalVelocity;
         private GameObject _heldItem;
         private Component _selectedStation;
         private Collider _selectedStationCollider;
@@ -53,8 +52,7 @@ namespace YesChef.Player
         private bool _interactionEnabled = true;
 
         /// <summary>
-        /// Raised after the player gains, hands off, or discards an item. UI should subscribe
-        /// to this event instead of polling <see cref="HeldItem"/>.
+        /// Raised after the player gains, hands off, or discards an item.
         /// </summary>
         public event Action<GameObject> HeldItemChanged;
 
@@ -64,7 +62,12 @@ namespace YesChef.Player
 
         private void Awake()
         {
-            _characterController = GetComponent<CharacterController>();
+            _navMeshAgent = GetComponent<NavMeshAgent>();
+
+            // Sync inspector settings to NavMeshAgent
+            _navMeshAgent.speed = _movementSpeed;
+            _navMeshAgent.angularSpeed = _rotationSpeed;
+
             _pointerPositionInputAction = _pointerPositionAction != null ? _pointerPositionAction.action : null;
             _pointerPressInputAction = _pointerPressAction != null ? _pointerPressAction.action : null;
 
@@ -111,21 +114,18 @@ namespace YesChef.Player
 
         private void Update()
         {
-            Vector3 movement = _movementEnabled ? GetMovementTowardsSelectedStation() : Vector3.zero;
+            if (!_movementEnabled || _selectedStation == null)
+            {
+                return;
+            }
 
-            ApplyGravity();
-            movement *= _movementSpeed;
-            movement.y = _verticalVelocity;
-            _characterController.Move(movement * Time.deltaTime);
+            CheckStationArrivalAndInteraction();
         }
 
-        /// <summary>
-        /// Enables or disables player locomotion without changing their carried item.
-        /// Game state transitions can call this in response to their state-change event.
-        /// </summary>
         public void SetMovementEnabled(bool isEnabled)
         {
             _movementEnabled = isEnabled;
+            _navMeshAgent.isStopped = !isEnabled;
             Log($"Movement {(isEnabled ? "enabled" : "disabled")}.");
 
             if (!isEnabled)
@@ -134,19 +134,12 @@ namespace YesChef.Player
             }
         }
 
-        /// <summary>
-        /// Enables or disables nearby-station interactions.
-        /// </summary>
         public void SetInteractionEnabled(bool isEnabled)
         {
             _interactionEnabled = isEnabled;
             Log($"Station interaction {(isEnabled ? "enabled" : "disabled")}.");
         }
 
-        /// <summary>
-        /// Places an item in the player's only carry slot. Stations should call this only after
-        /// their own acceptance rules have passed.
-        /// </summary>
         public bool TryPickUp(GameObject kitchenItem)
         {
             if (kitchenItem == null || !CanCarryItem)
@@ -156,21 +149,16 @@ namespace YesChef.Player
             }
 
             Transform parent = _holdPoint != null ? _holdPoint : transform;
-
-            // Pass 'true' so Unity adjusts localScale to keep the item's original world scale
             kitchenItem.transform.SetParent(parent, true);
             kitchenItem.transform.SetLocalPositionAndRotation(Vector3.zero, Quaternion.identity);
 
             _heldItem = kitchenItem;
             HeldItemChanged?.Invoke(_heldItem);
             Log($"Picked up '{kitchenItem.name}' and attached it to the hold point.");
+            transform.rotation = Quaternion.Euler(0f, 180f, 0f);
             return true;
         }
 
-        /// <summary>
-        /// Removes and returns the carried item. The receiving station owns the item's next
-        /// state, including whether it is placed, processed, or destroyed.
-        /// </summary>
         public GameObject ReleaseHeldItem()
         {
             GameObject releasedItem = _heldItem;
@@ -214,7 +202,15 @@ namespace YesChef.Player
             {
                 _selectedStation = stationComponent;
                 _selectedStationCollider = hit.collider;
-                Log($"Selected station '{stationComponent.name}'. Moving into interaction range.");
+
+                Vector3 origin = _interactionOrigin != null ? _interactionOrigin.position : transform.position;
+                Vector3 destination = GetApproachPoint(origin);
+
+                _navMeshAgent.isStopped = false;
+                _navMeshAgent.stoppingDistance = GetEffectiveInteractionRadius();
+                _navMeshAgent.SetDestination(destination);
+
+                Log($"Selected station '{stationComponent.name}'. Pathfinding to target.");
             }
             else
             {
@@ -223,49 +219,24 @@ namespace YesChef.Player
             }
         }
 
-        private Vector3 GetMovementTowardsSelectedStation()
+        private void CheckStationArrivalAndInteraction()
         {
             if (_selectedStation == null || _selectedStationCollider == null)
             {
                 ClearSelectedStation();
-                return Vector3.zero;
+                return;
             }
 
             Vector3 origin = _interactionOrigin != null ? _interactionOrigin.position : transform.position;
             float effectiveInteractionRadius = GetEffectiveInteractionRadius();
-            if (IsInInteractionRange(origin, effectiveInteractionRadius))
+
+            // Check if player is within range or path complete
+            if (IsInInteractionRange(origin, effectiveInteractionRadius) || 
+               (!_navMeshAgent.pathPending && _navMeshAgent.remainingDistance <= _navMeshAgent.stoppingDistance))
             {
                 Log($"Arrived at '{_selectedStation.name}'. Attempting interaction.");
                 AttemptSelectedInteraction();
-                return Vector3.zero;
             }
-
-            Vector3 movement = GetApproachPoint(origin) - origin;
-            movement.y = 0f;
-            if (movement.sqrMagnitude <= MovementInputThreshold)
-            {
-                Log($"Reached the collider of '{_selectedStation.name}'. Attempting interaction.");
-                AttemptSelectedInteraction();
-                return Vector3.zero;
-            }
-
-            movement.Normalize();
-            Quaternion targetRotation = Quaternion.LookRotation(movement, Vector3.up);
-            transform.rotation = Quaternion.RotateTowards(
-                transform.rotation,
-                targetRotation,
-                _rotationSpeed * Time.deltaTime);
-            return movement;
-        }
-
-        private void ApplyGravity()
-        {
-            if (_characterController.isGrounded && _verticalVelocity < 0f)
-            {
-                _verticalVelocity = GroundedVerticalVelocity;
-            }
-
-            _verticalVelocity += _gravity * Time.deltaTime;
         }
 
         private float GetEffectiveInteractionRadius()
@@ -339,6 +310,12 @@ namespace YesChef.Player
         {
             _selectedStation = null;
             _selectedStationCollider = null;
+
+            if (_navMeshAgent != null && _navMeshAgent.isOnNavMesh)
+            {
+                _navMeshAgent.isStopped = true;
+                _navMeshAgent.ResetPath();
+            }
         }
 
         private void OnDrawGizmos()
